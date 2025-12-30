@@ -7,7 +7,7 @@
 set -euo pipefail
 
 # --- [自定義變數 - 請修改此處] ---
-DOWNLOAD_URL="https://github.com/Dylan-Wung/guardian-one-web-release/blob/main/guardian_one_web.tar"
+DOWNLOAD_URL="https://github.com/Dylan-Wung/guardian-one-web-release/raw/refs/heads/main/guardian_one_web.tar"
 APP_USER="guardian"
 APP_TAR="guardian_one_web.tar"
 TARGET_HOME="/home/${APP_USER}"
