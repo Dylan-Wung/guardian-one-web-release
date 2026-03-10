@@ -1,8 +1,8 @@
 #!/bin/bash
 # ===========================================================================
-# Guardian One Web - 萬用全自動佈署腳本 (v3.0)
-# 支援硬體: Orange Pi One (armhf), Arduino UNO Q (arm64)
-# 功能: 自動偵測 CPU 架構、記憶體優化、ICMP 權限修正、Nginx 反向代理
+# Guardian One Web - 萬用全自動佈署腳本 (v3.1 Standard)
+# 適用環境: Orange Pi One (armhf), Arduino UNO Q (arm64)
+# 安裝路徑: /opt/guardian_one_web
 # ===========================================================================
 
 set -euo pipefail
@@ -10,25 +10,22 @@ set -euo pipefail
 # --- [ 1. 自定義變數 ] ---
 DOWNLOAD_URL="https://github.com/Dylan-Wung/guardian-one-web-release/raw/refs/heads/main/guardian_one_web.tar"
 APP_USER="guardian"
+APP_DIR="/opt/guardian_one_web"  # 遷移至標準應用程式目錄
 APP_TAR="guardian_one_web.tar"
-TARGET_HOME="/home/${APP_USER}"
-APP_DIR="${TARGET_HOME}/guardian_one_web"
 
-# --- [ 2. 環境偵測邏輯 ] ---
+# --- [ 2. 環境偵測 ] ---
 ARCH=$(uname -m)
-OS_BIT=$(getconf LONG_BIT)
 TOTAL_RAM=$(free -m | awk '/^Mem:/{print $2}')
 
-# --- [ 3. 工具函式 ] ---
 log()  { echo -e "\e[32m[INFO] $1\e[0m"; }
 error() { echo -e "\e[31m[ERROR] $1\e[0m"; exit 1; }
 
-# --- [ 4. 前置檢查 ] ---
+# --- [ 3. 前置檢查 ] ---
 [[ $EUID -ne 0 ]] && error "請使用 sudo 權限執行此腳本。"
 
-log "🚀 偵測到硬體架構: $ARCH ($OS_BIT-bit), 記憶體: ${TOTAL_RAM}MB"
+log "🚀 啟動萬用佈署流程 (架構: $ARCH)..."
 
-# --- [ 5. 記憶體保護 (針對 Orange Pi One 等小記憶體設備) ] ---
+# --- [ 4. 記憶體防護 (針對 Orange Pi One) ] ---
 if [ "$TOTAL_RAM" -lt 1000 ]; then
     log "檢測到低記憶體環境，配置 512MB 臨時 Swap..."
     if [ ! -f /swapfile ]; then
@@ -39,61 +36,57 @@ if [ "$TOTAL_RAM" -lt 1000 ]; then
     fi
 fi
 
-# --- [ 6. 系統帳號配置 ] ---
+# --- [ 5. 系統帳號與目錄準備 ] ---
 if ! id "$APP_USER" &>/dev/null; then
     log "建立專案使用者 ${APP_USER}..."
     adduser --disabled-password --gecos "" "$APP_USER"
-    # 加入 dialout 以利 Arduino 序列埠存取
     usermod -aG sudo,dialout "$APP_USER"
     echo "$APP_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/90-${APP_USER}"
 fi
 
-# --- [ 7. 套件安裝 ] ---
-log "更新系統套件庫..."
+# 建立並鎖定 /opt 目錄
+mkdir -p "$APP_DIR"
+chown "$APP_USER":"$APP_USER" "$APP_DIR"
+
+# --- [ 6. 系統套件安裝 ] ---
+log "安裝系統基礎環境..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
     htop curl wget net-tools python3-venv python3-pip python3-dev \
-    build-essential nginx zram-tools lsb-release bash-completion logrotate
+    build-essential nginx zram-tools logrotate
 
-# --- [ 8. 專案檔案下載 ] ---
-log "獲取專案源碼..."
-wget -q -L -O "/tmp/$APP_TAR" "$DOWNLOAD_URL" || error "下載失敗，請檢查 GitHub 連結。"
-mkdir -p "$APP_DIR"
-tar -xf "/tmp/$APP_TAR" -C "$TARGET_HOME"
-chown -R "${APP_USER}:${APP_USER}" "$APP_DIR"
+# --- [ 7. 專案下載與解壓縮 ] ---
+log "從雲端獲取專案檔至 $APP_DIR..."
+wget -q -L -O "/tmp/$APP_TAR" "$DOWNLOAD_URL" || error "下載失敗。"
+tar -xf "/tmp/$APP_TAR" -C "$APP_DIR" --strip-components=1 # 若 tar 內含目錄則攤平
+chown -R "$APP_USER":"$APP_USER" "$APP_DIR"
 rm "/tmp/$APP_TAR"
 
-# --- [ 9. yq 二進位檔適配 ] ---
+# --- [ 8. yq 二進位檔適配 ] ---
 if ! command -v yq &>/dev/null; then
     YQ_VER="v4.43.1"
-    if [[ "$ARCH" == "aarch64" ]]; then
-        YQ_BIN="yq_linux_arm64"
-    else
-        YQ_BIN="yq_linux_arm"
-    fi
-    log "安裝 yq 適配版本: $YQ_BIN..."
+    [[ "$ARCH" == "aarch64" ]] && YQ_BIN="yq_linux_arm64" || YQ_BIN="yq_linux_arm"
     wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VER}/${YQ_BIN}"
     chmod +x /usr/local/bin/yq
 fi
 
-# --- [ 10. Python 虛擬環境配置 ] ---
-log "建置 Python 環境 (Module Mode)..."
+# --- [ 9. Python 虛擬環境配置 (修正 Pip 錯誤) ] ---
+log "建置 Python 虛擬環境於 $APP_DIR/venv..."
 sudo -u "$APP_USER" bash <<EOF
 cd "$APP_DIR"
 python3 -m venv venv --clear
 ./venv/bin/python3 -m pip install --upgrade pip
-# 針對 Orange Pi 等資源受限設備強制不使用快取
 ./venv/bin/python3 -m pip install --no-cache-dir -r requirements.txt
 EOF
 
-# --- [ 11. ICMP (Ping) 權限修正 ] ---
-log "套用資安優化：ICMP Unprivileged Socket..."
+# --- [ 10. ICMP (Ping) 權限修正 ] ---
+log "設定核心參數以支援非特權 Ping..."
 sysctl -w net.ipv4.ping_group_range="0 2147483647"
 echo 'net.ipv4.ping_group_range = 0 2147483647' > /etc/sysctl.d/99-guardian-ping.conf
 
-# --- [ 12. 服務元件設定 (Systemd & Nginx) ] ---
-log "生成服務設定檔..."
+# --- [ 11. Systemd 服務設定 ] ---
+log "設定 Systemd 服務 (User=$APP_USER)..."
 cat > /etc/systemd/system/guardian-web.service <<EOF
 [Unit]
 Description=Guardian One WebApp Service
@@ -113,6 +106,7 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+# --- [ 12. Nginx 配置 ] ---
 cat > /etc/nginx/sites-available/default <<EOF
 server {
     listen 80;
@@ -123,27 +117,21 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     }
-    location /old_report {
-        alias /var/www/html;
-        index index.html;
-    }
 }
 EOF
 
-# --- [ 13. ZRAM 優化 ] ---
+# --- [ 13. 啟動與 ZRAM 優化 ] ---
 ZRAM_ALGO="lz4"
 [[ "$ARCH" == "aarch64" ]] && ZRAM_ALGO="lzo-rle"
 echo -e "ALGO=$ZRAM_ALGO\nPRIORITY=100\nSIZE=256" > /etc/default/zramswap
 
-# --- [ 14. 服務啟動 ] ---
-log "重載系統服務並啟動..."
 systemctl daemon-reload
 systemctl enable --now guardian-web.service
 systemctl restart nginx
 systemctl restart zramswap || true
 
 log "====================================================="
-log "✅ 萬用佈署完成！"
-log "硬體模式: $ARCH"
+log "✅ 佈署完成！"
+log "安裝路徑: $APP_DIR"
 log "存取網址: http://$(hostname -I | awk '{print $1}')"
 log "====================================================="
